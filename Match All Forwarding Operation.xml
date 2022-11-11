@@ -1,0 +1,27 @@
+For incoming requests:
+https://incoming.url.com/search/?q=dogs
+https://incoming.url.com/search/categories?q=dogs
+https://incoming.url.com/search/categories/x/y/z/etc....?q=blah
+
+Adding an operation...
+{
+  "name": "Search_GET",
+  "method": "GET",
+  "urlTemplate": "/search/*",
+  "policies": null
+}       
+
+Adding a policy for that operation...
+<policies>
+    <inbound>
+        <base />
+        <set-backend-service base-url="https://backend.url.com/" />
+        <rewrite-uri template="@(context.Request.Url.Path.Replace("search/", ""))" />
+        <set-header name="Api-Version" exists-action="skip">
+            <value>1.0</value>
+        </set-header>
+    </inbound>
+    <outbound>
+        <base />
+    </outbound>
+</policies>

@@ -1,0 +1,64 @@
+<!--
+    IMPORTANT:
+    - Policy elements can appear only within the <inbound>, <outbound>, <backend> section elements.
+    - To apply a policy to the incoming request (before it is forwarded to the backend service), place a corresponding policy element within the <inbound> section element.
+    - To apply a policy to the outgoing response (before it is sent back to the caller), place a corresponding policy element within the <outbound> section element.
+    - To add a policy, place the cursor at the desired insertion point and select a policy from the sidebar.
+    - To remove a policy, delete the corresponding policy statement from the policy document.
+    - Position the <base> element within a section element to inherit all policies from the corresponding section element in the enclosing scope.
+    - Remove the <base> element to prevent inheriting policies from the corresponding section element in the enclosing scope.
+    - Policies are applied in the order of their appearance, from the top down.
+    - Comments within policy elements are not supported and may disappear. Place your comments between policy elements or at a higher level scope.
+-->
+<policies>
+    <inbound>
+        <base />
+        <choose>
+            <when condition="@(context.Request.Headers.GetValueOrDefault("X-IDP","") == "OKTA")">
+                <validate-jwt header-name="Authorization" failed-validation-httpcode="401" failed-validation-error-message="Access denied due to invalid token. Make sure to include access token when making requests to an API.">
+                    <openid-config url="https://dev-703817.okta.com/oauth2/default/.well-known/oauth-authorization-server" />
+                    <required-claims>
+                        <claim name="aud" match="any" />
+                    </required-claims>
+                </validate-jwt>
+            </when>
+            <otherwise>
+                <validate-jwt header-name="Authorization" failed-validation-httpcode="401" failed-validation-error-message="Access denied due to invalid token. Make sure to include access token when making requests to an API." require-expiration-time="true" require-scheme="Bearer" require-signed-tokens="true">
+                    <openid-config url="https://login.microsoftonline.com/{{Azure-Tenant-ID}}/v2.0/.well-known/openid-configuration" />
+                    <!-- optional -->
+                    <audiences>
+                        <audience>{{Service-App-ClientID}}</audience>
+                    </audiences>
+                    <!-- optional -->
+                    <issuers>
+                        <issuer>https://login.microsoftonline.com/{{Azure-Tenant-ID}}/v3.0</issuer>
+                    </issuers>
+                    <required-claims>
+                        <claim name="aud">
+                            <!-- backend-app-client-id -->
+                            <value>{{Service-App-ClientID}}</value>
+                        </claim>
+                    </required-claims>
+                </validate-jwt>
+            </otherwise>
+        </choose>
+        <choose>
+            <when condition="@(context.Request.Certificate == null || !context.Request.Certificate.VerifyNoRevocation() || !context.Deployment.Certificates.Any(c => c.Value.Thumbprint == context.Request.Certificate.Thumbprint))">
+                <return-response>
+                    <set-status code="403" reason="Forbidden" />
+                </return-response>
+            </when>
+        </choose>
+        <set-header name="Ocp-Apim-Subscription-Key" exists-action="delete" />
+        <set-header name="Authorization" exists-action="delete" />
+    </inbound>
+    <backend>
+        <base />
+    </backend>
+    <outbound>
+        <base />
+    </outbound>
+    <on-error>
+        <base />
+    </on-error>
+</policies>

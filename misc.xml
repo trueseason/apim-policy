@@ -1,0 +1,54 @@
+<policies>
+    <inbound>
+        <base />
+        <cache-lookup-value key="oauth-token" variable-name="token" caching-type="internal" />
+        <send-request ignore-error="true" timeout="20" response-variable-name="bearerToken" mode="new">
+            <!-- i.e. https://login.microsoftonline.com/tenant-id/oauth2/v2.0/token -->
+            <set-url>{{authorizationServer}}</set-url>
+            <set-method>POST</set-method>
+            <set-header name="Content-Type" exists-action="override">
+                <value>application/x-www-form-urlencoded</value>
+            </set-header>
+            <set-body>@{
+                return "client_id={{clientId}}&scope={{scope}}&client_secret={{clientSecret}}&grant_type=client_credentials";
+            }</set-body>
+        </send-request>
+        <set-variable name="token" value="@((String)((IResponse)context.Variables["bearerToken"]).Body.As<JObject>()["access_token"])" />
+        <set-variable name="token-expires-in" value="@((String)((IResponse)context.Variables["bearerToken"]).Body.As<JObject>()["expires_in"])" />
+        <set-header name="Authorization" exists-action="override">
+            <value>@("Bearer " + (String)(context.Variables["token"]))</value>
+        </set-header>
+        <set-header name="Sample-Header" exists-action="override">
+            <value>Sample-Header-Value</value>
+        </set-header>
+        <set-header name="Ocp-Apim-Subscription-Key" exists-action="delete" />
+        <set-backend-service base-url="Backend-Url" />
+    </inbound>
+    <backend>
+        <base />
+    </backend>
+    <outbound>
+        <base />
+    </outbound>
+    <on-error>
+        <base />
+    </on-error>
+</policies>
+
+
+    <set-variable name="token">
+        <value>
+        @{ 
+          JObject res = ((IResponse)context.Variables["bearerToken"]).Body.As<JObject>(preserveContent: true); 
+          return res["access_token"].ToString(); 
+        }
+        </value>
+    </set-variable>
+    <set-variable name="token2">
+        <value>
+        @{ 
+          JObject res = ((IResponse)context.Variables["bearerToken"]).Body.As<JObject>(preserveContent: true); 
+          return res["expires_in"].ToString(); 
+        }
+        </value>
+    </set-variable>

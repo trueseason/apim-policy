@@ -1,0 +1,61 @@
+<policies>
+    <inbound>
+        <base />
+        <set-backend-service base-url="{{svc_base_url}}" />
+        <cache-lookup-value key="{{svc_base_url}}-token-key" variable-name="token" caching-type="internal" />
+        <cache-lookup-value key="{{svc_base_url}}-token-exp-key" variable-name="token-exp" caching-type="internal" />
+        <choose>
+            <when condition="@(!context.Variables.ContainsKey("token") || 
+                               !context.Variables.ContainsKey("token-exp") ||
+                               (context.Variables.ContainsKey("token") && 
+                                context.Variables.ContainsKey("token-exp") && 
+                                (DateTime.Parse((String)context.Variables["token-exp"]).AddMinutes(-1.0) 
+                                 <= DateTime.UtcNow) 
+                               )
+                            )">
+                <send-request ignore-error="false" timeout="{{svc_token_acquisition_timeout}}" response-variable-name="jwt" mode="new">
+                    <set-url>{{svc_token_endpoint}}</set-url>
+                    <set-method>POST</set-method>
+                    <set-header name="Content-Type" exists-action="override">
+                        <value>application/x-www-form-urlencoded</value>
+                    </set-header>
+                    <set-header name="Authorization" exists-action="override">
+                        <value>@("Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes("{{svc_client_id}}:{{svc_client_secret}}")))</value>
+                    </set-header>
+                    <set-body>@("username={{svc_username}}&password={{svc_password}}&grant_type=password")</set-body>
+                </send-request>
+                <set-variable name="token" value="@((String)((IResponse)context.Variables["jwt"]).Body.As<JObject>()["access_token"])" />
+                <set-variable name="token-exp" value="@{
+                    string jwt = (String)context.Variables["token"];
+                    string base64 = jwt.Split('.')[1].Replace("-", "+").Replace("_", "/");
+                    int mod4 = base64.Length % 4;
+                    if (mod4 > 0)
+                    {
+                        base64 += new String('=', 4 - mod4);
+                    }
+                    string base64_encoded = System.Text.Encoding.ASCII.GetString(Convert.FromBase64String(base64));
+                    double exp_num = (double)JObject.Parse(base64_encoded)["exp"];
+                    DateTime exp = (new DateTime(1970, 1, 1, 0, 0, 0, 0, DateTimeKind.Utc)).AddSeconds(exp_num);
+                    return exp.ToString("MM-dd-yyyy HH:mm:ss");
+                }" />
+                <cache-store-value key="{{svc_base_url}}-token-key" value="@((String)context.Variables["token"])" duration="3600" caching-type="internal" />
+                <cache-store-value key="{{svc_base_url}}-token-exp-key" value="@((String)context.Variables["token-exp"])" duration="3600" caching-type="internal" />
+            </when>
+        </choose>
+        <set-header name="Authorization" exists-action="override">
+            <value>@{
+                return $"Bearer {(String)context.Variables["token"]}";
+            }</value>
+        </set-header>
+        <set-header name="Ocp-Apim-Subscription-Key" exists-action="delete" />
+    </inbound>
+    <backend>
+        <base />
+    </backend>
+    <outbound>
+        <base />
+    </outbound>
+    <on-error>
+        <base />
+    </on-error>
+</policies>
