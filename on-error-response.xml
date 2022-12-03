@@ -1,0 +1,40 @@
+<policies>
+    <inbound>
+        <base />
+        <set-backend-service base-url="https://api.trasit.cm.kapish.cloud" />
+        <set-header name="Ocp-Apim-Subscription-Key" exists-action="delete" />
+    </inbound>
+    <backend>
+        <base />
+    </backend>
+    <outbound>
+        <base />
+    </outbound>
+    <on-error>
+        <base />
+        <return-response>
+            <set-status code="500" reason="Internal Server Error" />
+            <set-header name="Content-Type" exists-action="override">
+                <value>application/json</value>
+            </set-header>
+            <set-body>@{
+                var response = new JObject();
+                response.Add("errorTime", DateTime.Now);
+                response.Add("errorStatusCode", context.Response.StatusCode.ToString());
+                response.Add("errorScope", context.LastError.Scope);
+                response.Add("errorSection", context.LastError.Section);
+                response.Add("errorPath", context.LastError.Path);
+                response.Add("errorPolicyId", context.LastError.PolicyId);
+                response.Add("errorReason", context.LastError.Reason);
+                response.Add("errorMessage", context.LastError.Message);
+                return response.ToString();
+            }</set-body>
+            <!--set-body>@{
+                var arr = new List<string>();
+                arr.Add(context.LastError.Reason);
+                arr.Add(context.LastError.Message);
+				return string.Join("\n", arr);;
+            }</set-body-->
+        </return-response>
+    </on-error>
+</policies>
