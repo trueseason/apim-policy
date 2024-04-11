@@ -1,0 +1,1203 @@
+<Collections>
+<!-- Sample Policy Config -->
+<policies>
+    <inbound>
+        <cors allow-credentials="true">
+            <allowed-origins>
+                <origin>https://enterprise-apim-preprod</origin>
+                <origin>https://preprodportal.test.com</origin>
+                <origin>https://preprod.portal.api.enterprise.test.com</origin>
+                <origin>https://login.microsoftonline.com/</origin>
+                <origin>https://enterprise-apim-sit</origin>
+                <origin>https://sitportal.test.com</origin>
+                <origin>https://sit.portal.api.enterprise.test.com</origin>
+            </allowed-origins>
+            <allowed-methods preflight-result-max-age="300">
+                <method>*</method>
+            </allowed-methods>
+            <allowed-headers>
+                <header>*</header>
+            </allowed-headers>
+            <expose-headers>
+                <header>*</header>
+            </expose-headers>
+        </cors>
+    </inbound>
+    <backend>
+        <forward-request />
+    </backend>
+    <outbound />
+    <on-error />
+</policies>
+
+<!-- Sample Policy Config -->
+<policies>
+    <inbound>
+        <base />
+		<rate-limit calls="{{test-rate-limit-calls}}" renewal-period="{{test-rate-limit-renewal-period}}" />
+        <set-variable name="interfaceId" value="{{TEST-InterfaceId}}" />
+        <set-variable name="Appids" value="{{test-aad-claim}}" />
+        <include-fragment fragment-id="aad_token_validation" />
+        <include-fragment fragment-id="return-statuscode" />
+        <set-header name="Authorization" exists-action="delete" />
+        <set-header name="Content-type" exists-action="override">
+            <value>application/soap+xml</value>
+        </set-header>
+        <set-backend-service base-url="{{test-url}}" />
+        <rewrite-uri template="?" copy-unmatched-params="true" />
+		<include-fragment fragment-id="common_logger" />
+    </inbound>
+    <backend>
+        <base />
+    </backend>
+    <outbound>
+        <base />
+        <choose>
+            <when condition="@(context.Response.StatusCode == 422)">
+                <set-status code="400" />
+            </when>
+            <when condition="@(context.Response.StatusCode == 498)">
+                <set-status code="401" reason="Invalid Authorization token" />
+            </when>
+            <when condition="@(context.Response.StatusCode == 499)">
+                <set-status code="401" reason="Invalid Authorization token" />
+            </when>
+            <when condition="@(context.Response.StatusCode == 504)">
+                <set-status code="500" reason="Downstream error" />
+            </when>
+        </choose>
+		<include-fragment fragment-id="common_logger" />
+    </outbound>
+    <on-error>
+        <base />
+		<include-fragment fragment-id="common_logger" />
+    </on-error>
+</policies>
+
+<!-- Retry and Failover -->
+<fragment>
+    <!-- Derive primary and secondary hostnames from resource URIs -->
+    <set-variable name="primary_hostname" value="@{return new Uri((string)context.Variables["primary_resource_uri"]).Host;}" />
+    <set-variable name="secondary_hostname" value="@{return new Uri((string)context.Variables["secondary_resource_uri"]).Host;}" />
+
+    <!-- Retry for status codes greater than or equal to 408 -->
+    <retry condition="@((int)context.Response.StatusCode >= 408)" count="2" interval="1" first-fast-retry="true">
+        <choose>
+            <when condition="@(context.Response != null)">
+                <choose>
+                    <when condition="@(context.Request.Url.Host.Equals((string)context.Variables["primary_hostname"]))">
+                        <set-backend-service base-url="@{return $"{context.Variables.GetValueOrDefault("secondary_resource_uri")}";}" />
+                        <cache-store-value key="@($"primary_backend_{context.Variables.GetValueOrDefault("backendId")}_down_cache_key")" value="@(true)" duration="300" />
+                    </when>
+                    <when condition="@(context.Request.Url.Host.Equals((string)context.Variables["secondary_hostname"]))">
+                        <set-backend-service base-url="@{return $"{context.Variables.GetValueOrDefault("primary_resource_uri")}";}" />
+                        <cache-store-value key="@($"secondary_backend_{context.Variables.GetValueOrDefault("backendId")}_down_cache_key")" value="@(true)" duration="300" />
+                    </when>
+                </choose>
+            </when>
+        </choose>
+        <forward-request buffer-request-body="true" />
+        <choose>
+            <when condition="@((int)context.Response.StatusCode < 408)">
+                <choose>
+                    <when condition="@(context.Request.Url.Host.Equals((string)context.Variables["primary_hostname"]))">
+                        <cache-remove-value key="@($"primary_backend_{context.Variables.GetValueOrDefault("backendId")}_down_cache_key")" />
+                    </when>
+                    <when condition="@(context.Request.Url.Host.Equals((string)context.Variables["secondary_hostname"]))">
+                        <cache-remove-value key="@($"secondary_backend_{context.Variables.GetValueOrDefault("backendId")}_down_cache_key")" />
+                    </when>
+                </choose>
+            </when>
+        </choose>
+    </retry>
+</fragment>
+
+<!-- JWT Validation -->
+<fragment>
+    <validate-jwt header-name="Authorization" failed-validation-httpcode="401" failed-validation-error-message="Unauthorized. Access token is missing or invalid.">
+        <openid-config url="https://login.microsoftonline.com/{TenantId here}/.well-known/openid-configuration" />
+        <required-claims>
+            <claim name="aud" match="any">
+                <value>@((string)context.Variables["jwtAudValue1"])</value>
+                <value>@((string)context.Variables["jwtAudValue2"])</value>
+            </claim>
+            <claim name="roles" match="any">
+                <value>@((string)context.Variables["jwtRoleValue1"])</value>
+                <value>@((string)context.Variables["jwtRoleValue2"])</value>
+            </claim>
+        </required-claims>
+    </validate-jwt>
+</fragment>
+
+<!-- Error Response -->
+<fragment>
+    <return-response>
+        <set-header name="Content-Type" exists-action="override">
+            <value>application/problem+json</value>
+        </set-header>
+        <set-body>
+            {
+                "type": "https://example.com/errors/internal-server-error",
+                "title": "Internal Server Error",
+                "status": @(int)context.Response.StatusCode,
+                "detail": "@(context.LastError.Message)"
+            }
+        </set-body>
+    </return-response>
+</fragment>
+
+<!-- JWT Validation and compare AppID -->
+<fragment>
+	<validate-jwt header-name="Authorization" failed-validation-httpcode="401" failed-validation-error-message="Unauthorized. Access token is missing or invalid.">
+		<openid-config url="https://login.microsoftonline.com/{TenantId here}/.well-known/openid-configuration" />
+		<openid-config url="https://login.microsoftonline.com/{TenantId here}/v2.0/.well-known/openid-configuration" />
+	</validate-jwt>
+	<choose>
+		<when condition="@(context.Variables["Appids"] == null) ">
+			<return-response>
+				<set-status code="400" reason="BadRequest" />
+				<set-header name="content-type">
+					<value>application/json</value>
+				</set-header>
+				<set-body>
+                    { "statusCode": 400, "message": "No Appids"}
+				</set-body>
+			</return-response>
+		</when>
+	</choose>
+	<set-variable name="Appid" value="@{
+            var clientids = (string)context.Variables["Appids"];
+            var clientid_array = clientids.Split(',');
+            var authHeader = context.Request.Headers.GetValueOrDefault("Authorization", "");
+            string appid = authHeader.AsJwt()?.Claims.GetValueOrDefault("appid", "");
+            string azp = authHeader.AsJwt()?.Claims.GetValueOrDefault("azp", "");
+            if (Array.IndexOf(clientid_array, appid) <  0) {appid= null;}
+            if (Array.IndexOf(clientid_array, azp) >= 0) {appid= azp;}
+            return appid;
+    }" />
+	<choose>
+		<when condition="@(context.Variables["Appid"] == null)">
+			<return-response>
+				<set-status code="401" reason="No ClientId" />
+				<set-header name="content-type">
+					<value>application/json</value>
+				</set-header>
+				<set-body>
+                    { "statusCode": 401, "message": "No ClientId"}
+				</set-body>
+			</return-response>
+		</when>
+	</choose>
+</fragment>
+
+<!-- Sample Logging -->
+<fragment>
+	<set-variable name="all_headers" value="@{
+            string all_headers ="";
+            var headers = context.Request.Headers.Select(h => h);
+            foreach(var h in headers)
+            {
+              all_headers += h.Key + ":" + h.Value[0] + ",";
+            }
+            return all_headers;
+    }" />
+	<set-variable name="all_headers_res" value="@{
+            string all_headers_res ="";
+            var resHeaders = context.Response.Headers.Select(h => h);
+            foreach(var h in resHeaders)
+            {
+              all_headers_res += h.Key + ":" + h.Value[0] + ",";
+            }
+            return all_headers_res;
+    }" />
+	<set-variable name="trxn_size" value="@{
+            int trxn_size = 0;  
+            int req =  Convert.ToInt32(context.Request.Headers.GetValueOrDefault("Content-Length","0"));
+            int res =  Convert.ToInt32(context.Response.Headers.GetValueOrDefault("Content-Length","0"));
+            trxn_size = req + res;
+            return trxn_size;
+    }" />
+	<set-variable name="correlationid" value="@{
+           return context.Request.Headers.GetValueOrDefault("correlationid",Convert.ToString(context.RequestId));
+    }" />
+	<set-variable name="cledebugmode" value="@{
+            var cledebugmode = String.Format("{0}","{{cle-debug-mode-interfaceid-list-gs}}");
+            var cledebugmode_array = cledebugmode.Split(',');
+            string interfaceId = context.Variables.GetValueOrDefault<string>("interfaceId", "");
+            if (Array.IndexOf(cledebugmode_array, interfaceId) <  0) {return null;}
+            return interfaceId;
+    }" />
+	<set-variable name="apicommon_log_body" value="@{
+        string req_body = context.Request.Body == null ? ""  : Convert.ToString(context.Request.Body.As<string>(preserveContent: true));
+        string resp_body = context.Response.Body == null ? "" :  Convert.ToString(context.Response.Body.As<string>(preserveContent: true));
+        var json = new JObject();
+        json.Add("APPLICATIONID",context.Variables.GetValueOrDefault<string>("Appid","")); //AAD client ID
+        json.Add("EXCEPTIONID",""); //auto increment
+        json.Add("EXCEPTIONCODE", "");//blank
+        json.Add("COMPONENTNAME", Convert.ToString(context.Deployment.ServiceName)); //serive host name
+        json.Add("TRANSACTIONDOMAIN", ""); //blank
+        json.Add("INTERFACEID", context.Variables.GetValueOrDefault<string>("interfaceId", "")); //client name
+        json.Add("TIME_STAMP", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+        json.Add("MESSAGE", context.Variables.GetValueOrDefault<string>("body_message", "")); //Error Message
+        json.Add("TRANSACTIONDATA", ""); //blank
+        json.Add("CORRELATIONID", (string)context.Variables["correlationid"]); // correlationid
+        json.Add("EVENTTYPE","APIM");
+        json.Add("JMSPROPERTIES",""); //blank
+        json.Add("JOBID", Convert.ToString(context.RequestId)); //request Id
+        json.Add("LOGCATEGORY",context.Variables.GetValueOrDefault<string>("section", "")); //blank -> section
+        json.Add("LOGTYPE",""); //blank
+        json.Add("PROCESSNAMEWITHPATH",context.Variables.GetValueOrDefault<string>("componentName",""));
+        json.Add("TIMEDURATION", Convert.ToInt32(context.Elapsed.TotalMilliseconds)); //Elapsed Time
+        json.Add("CATEGORY"," "); //blank
+        json.Add("STATUS",  context.Response == null ? 0 : context.Response.StatusCode); //Status Code + Success/Error Message
+        json.Add("LOGAUDIT", 0); //blank
+        json.Add("TRANSACTIONSIZE", context.Variables.GetValueOrDefault<int>("trxn_size", 0)); //Request Size + Response Size
+        json.Add("RESUBMITFLAG",""); //blank
+        json.Add("HOSTNAME", String.Format("{0}", Convert.ToString(context.Request.OriginalUrl.Host).Length > 45 ? Convert.ToString(context.Request.OriginalUrl.Host).Remove(45) : Convert.ToString(context.Request.OriginalUrl.Host))); //APIM Host Name
+        json.Add("REQUESTURL", String.Format("{0}", Convert.ToString(context.Request.OriginalUrl).Length > 200 ? Convert.ToString(context.Request.OriginalUrl).Remove(200) : Convert.ToString(context.Request.OriginalUrl))); //APIM request URL
+        json.Add("REMOTEIP", Convert.ToString(context.Request.IpAddress)); //IP Address
+        json.Add("REQUESTMETHOD", Convert.ToString(context.Request.Method)); //Request Method
+        json.Add("AUTHENTICATIONTYPE","Azure AD Oauth 2.0"); //Auth Type
+        json.Add("INVOKE", String.Format("{0}", Convert.ToString(context.Request.OriginalUrl.Path).Length > 45 ? Convert.ToString(context.Request.OriginalUrl.Path).Remove(45) : Convert.ToString(context.Request.OriginalUrl.Path))); //Request URI
+        json.Add("REQUESTHEADER", context.Variables.GetValueOrDefault<string>("all_headers",""));//All Request Headers
+        json.Add("RESPONSEHEADER", context.Variables.GetValueOrDefault<string>("all_headers_res","")); //testing
+        json.Add("INTERFACETYPE","API");//Interface Type
+        json.Add("RESOURCETYPE", context.Variables.GetValueOrDefault<string>("componentName",""));//Service Name
+        json.Add("DIVISIONS", "{{tag-enterprise-gs}}");//Tag
+        if(context.Variables["cledebugmode"] != null)
+            {
+            json.Add("RESPONSEBODY", String.Format("{0}", resp_body.Length > Convert.ToInt32({{cle-debug-payload-size-gs}}) ? resp_body.Remove(Convert.ToInt32({{cle-debug-payload-size-gs}})) : resp_body));
+            json.Add("REQUESTBODY", String.Format("{0}", req_body.Length > Convert.ToInt32({{cle-debug-payload-size-gs}}) ? req_body.Remove(Convert.ToInt32({{cle-debug-payload-size-gs}})) : req_body));
+            json.Add("STACKTRACE","");
+            }
+        else
+            { 
+              json.Add("RESPONSEBODY", "");
+              json.Add("REQUESTBODY",  "");
+              json.Add("STACKTRACE", String.Format("{0}", resp_body.Length > 1000 ? resp_body.Remove(1000) : resp_body)); // blank due to new design   
+            }
+
+         return json.ToString(Newtonsoft.Json.Formatting.None);
+    }" />
+	<send-request mode="new" response-variable-name="common_logger" timeout="60" ignore-error="true">
+		<set-url>{{function-logger-url-gs}}</set-url>
+		<set-method>POST</set-method>
+		<set-body>@((string)context.Variables["apicommon_log_body"])</set-body>
+	</send-request>
+</fragment>
+
+<!-- Sample xslt Transformation -->
+<fragment>
+	<xsl-transform>
+		<xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform" xmlns:p1="urn:test:cssrp:po:eip:eam:pm:eqm:1.0" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:v1="http://test.com/Schema/CDM/Common/Common/v1" xmlns:v11="http://test.com/Schema/Asset/AssetConditionMaintenance/Fault/v1" xmlns:v13="http://test.com/Schema/CDM/Asset/AssetConditionMaintenance/Fault/v1" xmlns:v12="http://test.com/Schema/CDM/Asset/AssetConditionMaintenance/Agency/v1" version="2.0" exclude-result-prefixes="xsd soapenv v1 v11 v12 v13 p1">
+			<xsl:import-schema schemaLocation="/schemas/Common-v1" namespace="http://test.com/Schema/CDM/Common/Common/v1" />
+			<xsl:import-schema schemaLocation="/schemas/Agency-v1" namespace="http://test.com/Schema/CDM/Asset/AssetConditionMaintenance/Agency/v1" />
+			<xsl:import-schema schemaLocation="/schemas/Fault-v1" namespace="http://test.com/Schema/CDM/Asset/AssetConditionMaintenance/Fault/v1" />
+			<xsl:import-schema schemaLocation="/schemas/AssetFault" namespace="http://test.com/Schema/Asset/AssetConditionMaintenance/Fault/v1" />
+			<xsl:param name="GetHeader" select="/soapenv:Envelope/soapenv:Header/v1:ServiceHeader" />
+			<xsl:param name="QueryFault" select="/soapenv:Envelope/soapenv:Body" />
+			<xsl:output method="xml" indent="yes" omit-xml-declaration="yes" />
+			<xsl:template name="InvokeSAP-input" match="/">
+				<soapenv:Envelope xmlns:urn="urn:test:cssrp:po:eip:eam:pm:eqm:1.0">
+					<soapenv:Header />
+					<soapenv:Body>
+						<urn:MaintenanceRequestQueryByElementsRequest>
+							<MessageHeader>
+								<ID>
+									<xsl:value-of select="$GetHeader/TransactionId" />
+								</ID>
+								<xsl:if test="string-length($GetHeader/CorrelationId)&gt;0">
+									<ReferenceID>
+										<xsl:value-of select="$GetHeader/CorrelationId" />
+									</ReferenceID>
+								</xsl:if>
+								<CreationDateTime>
+									<xsl:value-of select="$GetHeader/EventDateTime" />
+								</CreationDateTime>
+								<TestDataIndicator>false</TestDataIndicator>
+								<ReconciliationIndicator>false</ReconciliationIndicator>
+								<xsl:if test="string-length($GetHeader/ProviderSystem)&gt;0">
+									<SenderBusinessSystemID>
+										<xsl:value-of select="$GetHeader/ProviderSystem" />
+									</SenderBusinessSystemID>
+								</xsl:if>
+								<RecipientBusinessSystemID>
+									<xsl:value-of select="$GetHeader/ConsumerSystem" />
+								</RecipientBusinessSystemID>
+								<xsl:if test="string-length($GetHeader/AdditionalAttributes[Name = &quot;SenderParty/InternalId&quot;]/Value)&gt;0">
+									<SenderParty>
+										<InternalID>
+											<xsl:value-of select="$GetHeader/AdditionalAttributes[Name = &quot;SenderParty/InternalId&quot;]/Value[1]" />
+										</InternalID>
+									</SenderParty>
+								</xsl:if>
+								<xsl:for-each select="$GetHeader/AdditionalAttributes[Name = &quot;RecipientParty/InternalId&quot;]/Value">
+									<RecipientParty>
+										<InternalID>
+											<xsl:value-of select="." />
+										</InternalID>
+									</RecipientParty>
+								</xsl:for-each>
+								<xsl:for-each select="$GetHeader/AdditionalAttributes[Name = &quot;BusinessScope/TypeCode&quot;]/Value">
+									<BusinessScope>
+										<TypeCode>
+											<xsl:value-of select="." />
+										</TypeCode>
+									</BusinessScope>
+								</xsl:for-each>
+							</MessageHeader>
+							<MaintenanceRequestBasicDataSelectionByElements>
+								<xsl:if test="string-length($QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:ComponentInternalId)&gt;0">
+									<MaterialInternalID>
+										<xsl:value-of select="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:ComponentInternalId" />
+									</MaterialInternalID>
+								</xsl:if>
+								<xsl:if test="string-length($QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:FunctionalLocationId)&gt;0">
+									<InstallationPointID>
+										<xsl:value-of select="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:FunctionalLocationId" />
+									</InstallationPointID>
+								</xsl:if>
+								<xsl:if test="string-length($QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:ComponentId)&gt;0">
+									<IndividualMaterialID>
+										<xsl:value-of select="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:ComponentId" />
+									</IndividualMaterialID>
+								</xsl:if>
+								<xsl:if test="string-length($QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:ReporterUserId)&gt;0">
+									<ReporterInternalID>
+										<xsl:value-of select="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:ReporterUserId" />
+									</ReporterInternalID>
+								</xsl:if>
+								<xsl:if test="string-length($QueryFault/v11:QueryFaultRequest/v11:QueryFault/v12:Agency/v12:Id)&gt;0">
+									<MaintenancePlanningPlantID>
+										<xsl:value-of select="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v12:Agency/v12:Id" />
+									</MaintenancePlanningPlantID>
+								</xsl:if>
+								<xsl:if test="string-length($QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:FaultType)&gt;0">
+									<MaintenanceRequestTypeCode>
+										<xsl:value-of select="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:FaultType" />
+									</MaintenanceRequestTypeCode>
+								</xsl:if>
+								<xsl:if test="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:FaultReportedDateTime">
+									<ReportedDateTime>
+										<xsl:value-of select="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:FaultReportedDateTime" />
+									</ReportedDateTime>
+								</xsl:if>
+								<xsl:if test="string-length($QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:UserStatusProfileCode)&gt;0">
+									<UserStatusProfileCode>
+										<xsl:value-of select="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:UserStatusProfileCode" />
+									</UserStatusProfileCode>
+								</xsl:if>
+								<xsl:if test="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:FaultDescription">
+									<Description>
+										<xsl:if test="string-length($QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:FaultLanguageCode)&gt;0">
+											<xsl:attribute name="languageCode">
+												<xsl:value-of select="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:FaultLanguageCode" />
+											</xsl:attribute>
+										</xsl:if>
+										<xsl:value-of select="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:FaultDescription" />
+									</Description>
+								</xsl:if>
+								<MaintenanceRequestAdditionalAttributes>
+									<xsl:if test="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:FaultFromDate">
+										<CreatedStartDate>
+											<xsl:value-of select="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:FaultFromDate" />
+										</CreatedStartDate>
+									</xsl:if>
+									<xsl:if test="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:FaultToDate">
+										<CreatedEndDate>
+											<xsl:value-of select="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:FaultToDate" />
+										</CreatedEndDate>
+									</xsl:if>
+									<xsl:if test="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:StartDateTime">
+										<MalfunctionStartDateTime>
+											<xsl:value-of select="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:StartDateTime" />
+										</MalfunctionStartDateTime>
+									</xsl:if>
+									<xsl:if test="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:EndDateTime">
+										<MalfunctionEndDateTime>
+											<xsl:value-of select="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:EndDateTime" />
+										</MalfunctionEndDateTime>
+									</xsl:if>
+									<xsl:if test="string-length($QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:FaultId)&gt;0">
+										<MaintenanceRequest>
+											<xsl:value-of select="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:FaultId" />
+										</MaintenanceRequest>
+									</xsl:if>
+									<xsl:if test="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v12:Agency/v12:SectionId">
+										<PlantSection>
+											<xsl:value-of select="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v12:Agency/v12:SectionId" />
+										</PlantSection>
+									</xsl:if>
+									<xsl:if test="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:IncludeCurrentFaultSource">
+										<GetCurrentFaultSource>
+											<xsl:value-of select="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:IncludeCurrentFaultSource" />
+										</GetCurrentFaultSource>
+									</xsl:if>
+									<xsl:for-each select="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:Characteristics">
+										<ReferenceObjectList>
+											<ReferenceTechnicalObjectID>
+												<xsl:if test="string-length(v11:SchemeAgencyId)&gt;0">
+													<xsl:attribute name="schemeAgencyID">
+														<xsl:value-of select="v11:SchemeAgencyId" />
+													</xsl:attribute>
+												</xsl:if>
+												<xsl:if test="string-length(v11:SchemeId)&gt;0">
+													<xsl:attribute name="schemeID">
+														<xsl:value-of select="v11:SchemeId" />
+													</xsl:attribute>
+												</xsl:if>
+												<xsl:value-of select="v11:ReferenceId" />
+											</ReferenceTechnicalObjectID>
+											<xsl:if test="string-length(v11:ReferenceType)&gt;0">
+												<ReferenceTechnicalObjectType>
+													<xsl:value-of select="v11:ReferenceType" />
+												</ReferenceTechnicalObjectType>
+											</xsl:if>
+										</ReferenceObjectList>
+									</xsl:for-each>
+									<xsl:if test="string-length($QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:FaultPriority)&gt;0">
+										<Priority>
+											<xsl:value-of select="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:FaultPriority" />
+										</Priority>
+									</xsl:if>
+									<xsl:if test="string-length($QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:ActivityId)&gt;0">
+										<TripNumber>
+											<xsl:value-of select="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:ActivityId" />
+										</TripNumber>
+									</xsl:if>
+									<xsl:choose>
+										<xsl:when test="string-length($QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:IncludeIncidentDetails)&gt;0">
+											<IncidentDetailsRequired>
+												<xsl:value-of select="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:IncludeIncidentDetails" />
+											</IncidentDetailsRequired>
+										</xsl:when>
+										<xsl:otherwise>
+											<IncidentDetailsRequired>false</IncidentDetailsRequired>
+										</xsl:otherwise>
+									</xsl:choose>
+									<xsl:for-each select="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:DefectDetails">
+										<DefectDetails>
+											<xsl:if test="string-length(v11:DefectId)&gt;0">
+												<DefectNumber>
+													<xsl:value-of select="v11:DefectId" />
+												</DefectNumber>
+											</xsl:if>
+											<xsl:if test="string-length(v11:DefectSystem)&gt;0">
+												<DefectSystem>
+													<xsl:value-of select="v11:DefectSystem" />
+												</DefectSystem>
+											</xsl:if>
+										</DefectDetails>
+									</xsl:for-each>
+									<xsl:for-each select="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:UserStatusCode">
+										<UserStatusCode>
+											<xsl:value-of select="." />
+										</UserStatusCode>
+									</xsl:for-each>
+									<xsl:for-each select="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:SystemStatusCode">
+										<SystemStatusCode>
+											<xsl:value-of select="." />
+										</SystemStatusCode>
+									</xsl:for-each>
+									<xsl:for-each select="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:FaultSymptom">
+										<SymptomDetails>
+											<xsl:if test="string-length(v13:CategoryCatalogId)&gt;0">
+												<CategoryCatalogueID>
+													<xsl:value-of select="v13:CategoryCatalogId" />
+												</CategoryCatalogueID>
+											</xsl:if>
+											<xsl:if test="string-length(v13:CodeGroupId)&gt;0">
+												<IssueCodeGroupID>
+													<xsl:value-of select="v13:CodeGroupId" />
+												</IssueCodeGroupID>
+											</xsl:if>
+											<xsl:if test="string-length(v13:Code)&gt;0">
+												<IssueCode>
+													<xsl:value-of select="v13:Code" />
+												</IssueCode>
+											</xsl:if>
+											<xsl:if test="v13:CodeDescription">
+												<IssueCodeDescription>
+													<xsl:value-of select="v13:CodeDescription" />
+												</IssueCodeDescription>
+											</xsl:if>
+										</SymptomDetails>
+									</xsl:for-each>
+									<xsl:choose>
+										<xsl:when test="string-length($QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:IncludeFaultFullDetails)&gt;0">
+											<xsl:if test="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:IncludeFaultFullDetails">
+												<GetFaultFullDetails>
+													<xsl:value-of select="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:IncludeFaultFullDetails" />
+												</GetFaultFullDetails>
+											</xsl:if>
+										</xsl:when>
+										<xsl:otherwise>
+											<GetFaultFullDetails>false</GetFaultFullDetails>
+										</xsl:otherwise>
+									</xsl:choose>
+									<xsl:if test="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:LinearStartPoint/v11:Measure">
+										<LinearStartPoint>
+											<xsl:attribute name="unitCode">
+												<xsl:value-of select="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:LinearStartPoint/v11:UnitCode" />
+											</xsl:attribute>
+											<xsl:value-of select="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:LinearStartPoint/v11:Measure" />
+										</LinearStartPoint>
+									</xsl:if>
+									<xsl:if test="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:LinearEndPoint/v11:Measure">
+										<LinearEndPoint>
+											<xsl:attribute name="unitCode">
+												<xsl:value-of select="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:LinearEndPoint/v11:UnitCode" />
+											</xsl:attribute>
+											<xsl:value-of select="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:LinearEndPoint/v11:Measure" />
+										</LinearEndPoint>
+									</xsl:if>
+									<xsl:for-each select="$QueryFault/v11:QueryFaultRequest/v11:QueryFault/v11:FaultCodeGroup">
+										<CodeGroups>
+											<xsl:if test="string-length(v13:CategoryCatalogId)&gt;0">
+												<CategoryCatalogueID>
+													<xsl:value-of select="v13:CategoryCatalogId" />
+												</CategoryCatalogueID>
+											</xsl:if>
+											<xsl:if test="string-length(v13:CodeGroupId)&gt;0">
+												<IssueCodeGroupID>
+													<xsl:value-of select="v13:CodeGroupId" />
+												</IssueCodeGroupID>
+											</xsl:if>
+											<xsl:if test="string-length(v13:Code)&gt;0">
+												<IssueCode>
+													<xsl:value-of select="v13:Code" />
+												</IssueCode>
+											</xsl:if>
+											<xsl:if test="v13:CodeDescription">
+												<IssueCodeDescription>
+													<xsl:value-of select="v13:CodeDescription" />
+												</IssueCodeDescription>
+											</xsl:if>
+										</CodeGroups>
+									</xsl:for-each>
+								</MaintenanceRequestAdditionalAttributes>
+							</MaintenanceRequestBasicDataSelectionByElements>
+							<xsl:for-each select="$QueryFault/v11:QueryFaultRequest/v11:ProcessingDetails">
+								<ProcessingConditions>
+									<xsl:if test="string-length(v11:ReturnedRecordCount)&gt;0">
+										<QueryHitsMaximumNumberValue>
+											<xsl:value-of select="v11:ReturnedRecordCount" />
+										</QueryHitsMaximumNumberValue>
+									</xsl:if>
+									<QueryHitsUnlimitedIndicator>
+										<xsl:value-of select="v11:IncludeMoreHits" />
+									</QueryHitsUnlimitedIndicator>
+									<xsl:if test="string-length(v11:LastReturnedId)&gt;0">
+										<LastReturnedObjectID>
+											<xsl:value-of select="v11:LastReturnedId" />
+										</LastReturnedObjectID>
+									</xsl:if>
+								</ProcessingConditions>
+							</xsl:for-each>
+						</urn:MaintenanceRequestQueryByElementsRequest>
+					</soapenv:Body>
+				</soapenv:Envelope>
+			</xsl:template>
+		</xsl:stylesheet>
+	</xsl-transform>
+	<set-header name="content-type" exists-action="override">
+		<value>application/xml</value>
+	</set-header>
+	<set-variable name="body" value="@{
+        var Request = context.Request.Body.As<XDocument>();  
+        Regex regex = new Regex(@">\s*<");  
+        string Xml = regex.Replace(Request.ToString(), "><");
+        return String.Format("{0}",Xml.ToString());
+    }" />
+	<set-body>@((string)context.Variables["body"])</set-body>
+</fragment>
+
+<!-- Error Response -->
+<fragment>
+	<choose>
+		<when condition="@(context.Request.Headers.GetValueOrDefault("statuscode") == "405")">
+			<return-response>
+				<set-status code="405" reason="Method Not Allowed" />
+			</return-response>
+		</when>
+	</choose>
+	<choose>
+		<when condition="@(context.Request.Headers.GetValueOrDefault("statuscode") == "503")">
+			<return-response>
+				<set-status code="503" reason="Service Unavailable" />
+			</return-response>
+		</when>
+	</choose>
+	<choose>
+		<when condition="@(context.Request.Headers.GetValueOrDefault("statuscode") == "504")">
+			<return-response>
+				<set-status code="504" reason="Gateway Timeout" />
+			</return-response>
+		</when>
+	</choose>
+	<choose>
+		<when condition="@(context.Request.Headers.GetValueOrDefault("statuscode") == "500")">
+			<return-response>
+				<set-status code="500" reason="Internal Server Error" />
+			</return-response>
+		</when>
+	</choose>
+</fragment>
+
+<!-- Validate Content -->
+<fragment>
+	<set-variable name="ReqBody" value="@((string)context.Request.Body.As<string>(preserveContent:true))" />
+	<choose>
+		<when condition="@(context.Variables.GetValueOrDefault("validate_header_key","") != "" )">
+			<set-variable name="Header" value="@{
+                    var xmlDoc = new System.Xml.XmlDocument();
+                    xmlDoc.LoadXml((string)context.Variables["ReqBody"]);
+                    XmlNamespaceManager nsmgr = new XmlNamespaceManager(xmlDoc.NameTable);
+                    nsmgr.AddNamespace("v1", "http://test.com/Schema/CDM/Common/Common/v1");
+                    string key = string.Format("//{0}", context.Variables["validate_header_key"]);
+                    var Header = xmlDoc.SelectSingleNode(key, nsmgr);
+                    return Header.OuterXml;
+                }" />
+			<set-body>@((string)context.Variables["Header"])</set-body>
+			<validate-content unspecified-content-type-action="prevent" max-size="102400" size-exceeded-action="prevent" errors-variable-name="requestBodyValidation">
+				<content type="application/xml" validate-as="xml" action="prevent" schema-id="Common-v1" />
+			</validate-content>
+		</when>
+		<otherwise>
+			<return-response>
+				<set-status code="400" />
+				<set-body>"validate_header_key is not defined"</set-body>
+			</return-response>
+		</otherwise>
+	</choose>
+	<choose>
+		<when condition="@(context.Variables.GetValueOrDefault("validate_body_key","") != "" )">
+			<set-variable name="Body" value="@{
+                    var xmlDoc = new System.Xml.XmlDocument();
+                    xmlDoc.LoadXml((string)context.Variables["ReqBody"]);
+                    XmlNamespaceManager nsmgr = new XmlNamespaceManager(xmlDoc.NameTable);
+                    nsmgr.AddNamespace("v11", "http://au/Schema/Asset/AssetConditionMaintenance/Fault/v1");
+                    string key = string.Format("//{0}", context.Variables["validate_body_key"]);
+                    var Body = xmlDoc.SelectSingleNode(key, nsmgr);
+                    return Body.OuterXml;
+                }" />
+			<set-body>@((string)context.Variables["Body"])</set-body>
+			<validate-content unspecified-content-type-action="prevent" max-size="102400" size-exceeded-action="prevent" errors-variable-name="requestBodyValidation">
+				<content type="application/xml" validate-as="xml" action="prevent" schema-id="FaultMessages" />
+			</validate-content>
+		</when>
+		<otherwise>
+			<return-response>
+				<set-status code="400" />
+				<set-body>"validate_body_key is not defined"</set-body>
+			</return-response>
+		</otherwise>
+	</choose>
+	<set-body>@((string)context.Variables["ReqBody"])</set-body>
+</fragment>
+
+<!-- Validate aad Token -->
+<fragment>
+	<validate-azure-ad-token tenant-id="{{aad-tenant-id}}" failed-validation-error-message="ad-token">
+		<client-application-ids>
+			<application-id>{{mfa-clientid-portal}}</application-id>
+			<application-id>{{mfa-clientid-pega}}</application-id>
+		</client-application-ids>
+	</validate-azure-ad-token>
+</fragment>
+
+<!-- Validate AppID -->
+<fragment>
+	<choose>
+		<when condition="@(context.Variables["Appids"] == null) ">
+			<return-response>
+				<set-status code="400" reason="BadRequest" />
+				<set-header name="content-type">
+					<value>application/json</value>
+				</set-header>
+				<set-body>
+                    { "statusCode": 400, "message": "No Appids"}
+				</set-body>
+			</return-response>
+		</when>
+	</choose>
+	<set-variable name="Appid" value="@{
+            var clientids = (string)context.Variables["Appids"];
+            var clientid_array = clientids.Split(',');
+            var authHeader = context.Request.Headers.GetValueOrDefault("Authorization", "");
+            string appid = authHeader.AsJwt()?.Claims.GetValueOrDefault("appid", "");
+            if (Array.IndexOf(clientid_array, appid) < 0) {appid= null;}
+            return appid;
+    }" />
+	<choose>
+		<when condition="@(context.Variables["Appid"] == null)">
+			<return-response>
+				<set-status code="401" reason="No ClientId" />
+				<set-header name="content-type">
+					<value>application/json</value>
+				</set-header>
+				<set-body>
+                    { "statusCode": 401, "message": "No ClientId"}
+				</set-body>
+			</return-response>
+		</when>
+	</choose>
+</fragment>
+
+<!-- Validate JWT Token -->
+<fragment>
+	<validate-jwt header-name="Authorization" failed-validation-httpcode="401" failed-validation-error-message="Unauthorized. Access token is missing or invalid." require-scheme="Bearer">
+		<openid-config url="https://login.microsoftonline.com/{TenantId here}/.well-known/openid-configuration" />
+		<audiences>
+			<audience>api://sample-app-id</audience>
+		</audiences>
+		<issuers>
+			<issuer>https://sts.windows.net/{Issuers here}/</issuer>
+		</issuers>
+	</validate-jwt>
+</fragment>
+
+<!-- Validate JWT Token -->
+<fragment>
+	<validate-jwt header-name="Authorization" failed-validation-httpcode="401" failed-validation-error-message="Unauthorized. Access token is missing or invalid." require-scheme="Bearer">
+		<openid-config url="{{openidUrl1}}" />
+		<openid-config url="{{openIdUrl2}}" />
+		<audiences>
+			<audience>{{audience here}}</audience>
+		</audiences>
+		<issuers>
+			<issuer>{{issuer here}}</issuer>
+		</issuers>
+	</validate-jwt>
+</fragment>
+
+<!-- Generate AWS Signature -->
+<fragment>
+	<set-variable name="datetimestamp" value="@(DateTime.UtcNow.ToString("yyyyMMddTHHmmssZ"))" />
+	<set-variable name="datestamp" value="@{
+        string date = (string)context.Variables["datetimestamp"];
+        return date.Substring(0,8);
+    }" />
+	<set-variable name="aws_headers" value="content-,host,x-amz-" />
+	<set-variable name="Request_payload" value="@(context.Request.Headers.GetValueOrDefault("Content-Length") == "0" ? string.Empty : context.Request.Body.As<string>(preserveContent: true))" />
+	<set-variable name="Request_payload_hash" value="@{
+            string Request_payload = (string)context.Variables["Request_payload"];
+            var sha256 = new System.Security.Cryptography.SHA256Managed();
+            var hash = sha256.ComputeHash(System.Text.Encoding.UTF8.GetBytes(Request_payload));
+            return BitConverter.ToString(hash).Replace("-", string.Empty).ToLower();
+        }" />
+	<set-header name="X-Amz-Content-Sha256" exists-action="override">
+		<value>@((string)context.Variables["Request_payload_hash"])</value>
+	</set-header>
+	<set-header name="x-amz-date" exists-action="override">
+		<value>@((string)context.Variables["datetimestamp"])</value>
+	</set-header>
+	<set-variable name="hostname" value="@{
+        Uri backendurl = new Uri("{{kerbsensor-backendurl}}");
+        return backendurl.Host;
+    }" />
+	<set-header name="host" exists-action="override">
+		<value>@((string)context.Variables["hostname"])</value>
+	</set-header>
+	<set-variable name="filename" value="@{
+            string filename="";
+            var headers = context.Request.Headers.Where(h => h.Key.Equals("filename", StringComparison.OrdinalIgnoreCase)).OrderBy(h => h.Key);
+            foreach(var h in headers) {
+                filename += "/" + h.Value[0];
+            }
+            return filename;
+    }" />
+	<set-variable name="signed_headers" value="@{
+            string aws_headers = (string)context.Variables["aws_headers"];
+            string signed_headers="";
+            foreach(var header in  aws_headers.Split(',')) {
+               var headers = context.Request.Headers.Where(h => h.Key.StartsWith(header, StringComparison.OrdinalIgnoreCase)).OrderBy(h => h.Key);
+                foreach(var h in headers) {
+                   signed_headers += h.Key.ToLowerInvariant() + ";";
+                }
+            }
+            return signed_headers.TrimEnd(';');
+    }" />
+	<set-variable name="canonical_headers" value="@{
+            string aws_headers = (string)context.Variables["aws_headers"];
+            string canonical_headers="";
+            foreach(var header in aws_headers.Split(',')) {
+                var headers = context.Request.Headers.Where(h => h.Key.StartsWith(header, StringComparison.OrdinalIgnoreCase)).OrderBy(h => h.Key);
+                foreach(var h in headers) {
+                    canonical_headers += h.Key.ToLowerInvariant() + ":" + h.Value[0] + "\n";
+                }
+            } 
+            return canonical_headers;
+    }" />
+	<set-variable name="canonical_request" value="@{
+            string method = context.Request.Method;
+            string canonicalUri =  context.Request.Url.Path + (string)context.Variables["filename"];
+            var queryParams = context.Request.Url.Query.ToDictionary(kvp => kvp.Key.ToLowerInvariant(), kvp => kvp.Value);
+            var canonicalqueryString = string.Join("&", queryParams.OrderBy(kvp => kvp.Key).Select(kvp => kvp.Key + "=" + kvp.Value));
+            string canonicalHeaders = (string)context.Variables["canonical_headers"];
+            string signedHeaders =   (string)context.Variables["signed_headers"];
+            string payloadHash = (string)context.Variables["Request_payload_hash"];
+            return $"{method}\n{canonicalUri}\n{canonicalqueryString}\n{canonicalHeaders}\n{signedHeaders}\n{payloadHash}";
+          
+        }" />
+	<set-variable name="canonical_request_hash" value="@{
+            string canonical_request = (string)context.Variables["canonical_request"];
+            var sha256 = new System.Security.Cryptography.SHA256Managed();
+            var hash = sha256.ComputeHash(System.Text.Encoding.UTF8.GetBytes(canonical_request));
+            return BitConverter.ToString(hash).Replace("-", string.Empty).ToLower();
+        }" />
+	<set-variable name="credential_scope" value="@{
+        return string.Format("{0}/{1}/{2}/aws4_request",(string)context.Variables["datestamp"], "{{kerbsensor-aws-region}}" , "{{kerbsensor-aws-servicename}}");
+    }" />
+	<set-variable name="stringToSign" value="@{
+            string algorithm = "AWS4-HMAC-SHA256";
+            string amz_date = (string)context.Variables["datetimestamp"];
+            string credential_scope = (string)context.Variables["credential_scope"];
+            string canonical_request_hash = (string)context.Variables["canonical_request_hash"];
+            return $"{algorithm}\n{amz_date}\n{credential_scope}\n{canonical_request_hash}";
+        }" />
+	<set-variable name="signing_key" value="@{
+            var Kaws4 = string.Format("AWS4{0}","{{kerbsensor-aws-secretkey}}").ToCharArray();
+            var Kaws4Bytes = Encoding.UTF8.GetBytes(Kaws4);
+            var datestamp = Encoding.UTF8.GetBytes((string)context.Variables["datestamp"]);
+            var hmac = new HMACSHA256(Kaws4Bytes);
+            var KDate = hmac.ComputeHash(datestamp);
+            var region = Encoding.UTF8.GetBytes("{{kerbsensor-aws-region}}");
+            var hmac1 = new HMACSHA256(KDate);
+            var KRegion = hmac1.ComputeHash(region);
+            var servicename = Encoding.UTF8.GetBytes("{{kerbsensor-aws-servicename}}");
+            var hmac2 = new HMACSHA256(KRegion);
+            var KService = hmac2.ComputeHash(servicename);
+            var aws4_request = Encoding.UTF8.GetBytes("aws4_request");
+            var hmac3 = new HMACSHA256(KService);
+            return hmac3.ComputeHash(aws4_request);
+      
+        }" />
+	<set-variable name="calculate_signature" value="@{
+            var signing_keyBytes = (byte[])context.Variables["signing_key"];
+            var stringToSignBytes = Encoding.UTF8.GetBytes((string)context.Variables["stringToSign"]);
+            var hmac = new HMACSHA256(signing_keyBytes);
+            var signature = hmac.ComputeHash(stringToSignBytes);
+            return BitConverter.ToString(signature).Replace("-", string.Empty).ToLower();
+    
+    }" />
+	<set-header name="Authorization" exists-action="override">
+		<value>@{
+            string algorithm = "AWS4-HMAC-SHA256 Credential=";
+            string accesskey = "{{kerbsensor-aws-accesskey}}";
+            string credential_scope = (string)context.Variables["credential_scope"];
+            string signedHeader = (string)context.Variables["signed_headers"];
+            string signature =  (string)context.Variables["calculate_signature"];
+            return string.Format("{0}{1}/{2}, SignedHeaders={3}, Signature={4}",algorithm, accesskey, credential_scope, signedHeader, signature);
+        }</value>
+	</set-header>
+</fragment>
+
+<!-- Oauth Token Acquisition -->
+<fragment>
+	<send-request ignore-error="true" timeout="60" response-variable-name="bearerToken" mode="new">
+		<set-url>{{token-url}}</set-url>
+		<set-method>POST</set-method>
+		<set-header name="Content-Type" exists-action="override">
+			<value>application/x-www-form-urlencoded</value>
+		</set-header>
+		<set-body>@("grant_type=client_credentials&client_id={{client-id}}&client_secret={{client-secret}}&scope={{client-scope}}")</set-body>
+	</send-request>
+	<choose>
+		<when condition="@(((IResponse)context.Variables["bearerToken"]).StatusCode == 200)">
+			<set-header name="Authorization" exists-action="override">
+				<value>@("Bearer " + ((IResponse)context.Variables["bearerToken"]).Body.As<JObject>()["access_token"] )</value>
+			</set-header>
+		</when>
+		<otherwise>
+			<return-response>
+				<set-status code="400" reason="Token Failed" />
+				<set-body>@(((IResponse)context.Variables["bearerToken"]).Body.As<string>())</set-body>
+			</return-response>
+		</otherwise>
+	</choose>
+</fragment>
+
+<!-- Sample Logging -->
+<fragment>
+	<set-variable name="all_headers" value="@{
+            string all_headers ="";
+            var headers = context.Request.Headers.Select(h => h);
+            foreach(var h in headers)
+            {
+              all_headers += h.Key + ":" + h.Value[0] + ",";
+            }
+            return all_headers;
+    }" />
+	<set-variable name="all_headers_res" value="@{
+            string all_headers_res ="";
+            var resHeaders = context.Response.Headers.Select(h => h);
+            foreach(var h in resHeaders)
+            {
+              all_headers_res += h.Key + ":" + h.Value[0] + ",";
+            }             
+            return all_headers_res;
+    }" />
+	<set-variable name="trxn_size" value="@{
+            int trxn_size = 0;  
+            int req =  Convert.ToInt32(context.Request.Headers.GetValueOrDefault("Content-Length","0"));
+            int res =  Convert.ToInt32(context.Response.Headers.GetValueOrDefault("Content-Length","0"));
+            trxn_size = req + res;
+            return trxn_size;
+    }" />
+	<set-variable name="correlationid" value="@{
+           return context.Request.Headers.GetValueOrDefault("correlationid",Convert.ToString(context.RequestId));
+    }" />
+	<set-variable name="apicommon_log_body" value="@{
+        string req_body = context.Request.Body == null ? "" : Convert.ToString(context.Request.Body.As<string>(preserveContent: true));
+        string resp_body = context.Response.Body == null ? "empty" :  Convert.ToString(context.Response.Body.As<string>(preserveContent: true));
+        var json = new JObject();
+        json.Add("APPLICATIONID",context.Variables.GetValueOrDefault<string>("Appid","")); //AAD client ID
+        json.Add("EXCEPTIONID",""); //auto increment
+        json.Add("EXCEPTIONCODE", "");//blank
+        json.Add("COMPONENTNAME", "BACKENDLOGGER"); //serive host name
+        json.Add("TRANSACTIONDOMAIN", ""); //blank
+        json.Add("INTERFACEID", "LOGGER"); //client name   
+        json.Add("TIME_STAMP", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+        json.Add("MESSAGE", context.Variables.GetValueOrDefault<string>("body_message", "")); //Error Message
+        json.Add("TRANSACTIONDATA", ""); //blank
+        json.Add("STACKTRACE", String.Format("{0}", resp_body.Length > 1000 ? resp_body.Remove(1000) : resp_body));    
+        json.Add("CORRELATIONID", (string)context.Variables["correlationid"]); // correlationid
+        json.Add("EVENTTYPE","APIM"); 
+        json.Add("JMSPROPERTIES",""); //blank
+        json.Add("JOBID", Convert.ToString(context.RequestId)); //request Id
+        json.Add("LOGCATEGORY",""); //blank
+        json.Add("LOGTYPE",""); //blank
+        json.Add("PROCESSNAMEWITHPATH","BACKENDLOGGER");       
+        json.Add("TIMEDURATION", Convert.ToInt32(context.Elapsed.TotalMilliseconds)); //Elapsed Time
+        json.Add("CATEGORY"," "); //blank
+        json.Add("STATUS",  context.Response == null ? 0 : context.Response.StatusCode); //Status Code + Success/Error Message       
+        json.Add("LOGAUDIT", 0); //blank
+        json.Add("TRANSACTIONSIZE", context.Variables.GetValueOrDefault<int>("trxn_size", 0)); //Request Size + Response Size
+        json.Add("RESUBMITFLAG",""); //blank
+        json.Add("HOSTNAME", String.Format("{0}", Convert.ToString(context.Request.OriginalUrl.Host).Length > 45 ? Convert.ToString(context.Request.OriginalUrl.Host).Remove(45) : Convert.ToString(context.Request.OriginalUrl.Host))); //APIM Host Name
+        json.Add("REQUESTURL", String.Format("{0}", Convert.ToString(context.Request.OriginalUrl).Length > 200 ? Convert.ToString(context.Request.OriginalUrl).Remove(200) : Convert.ToString(context.Request.OriginalUrl))); //APIM request URL
+        json.Add("REMOTEIP", Convert.ToString(context.Request.IpAddress)); //IP Address
+        json.Add("REQUESTMETHOD", Convert.ToString(context.Request.Method)); //Request Method
+        json.Add("AUTHENTICATIONTYPE","Azure AD Oauth 2.0"); //Auth Type
+        json.Add("INVOKE", String.Format("{0}", Convert.ToString(context.Request.OriginalUrl.Path).Length > 45 ? Convert.ToString(context.Request.OriginalUrl.Path).Remove(45) : Convert.ToString(context.Request.OriginalUrl.Path))); //Request URI
+        json.Add("REQUESTHEADER", context.Variables.GetValueOrDefault<string>("all_headers",""));//All Request Headers
+        json.Add("RESPONSEHEADER", context.Variables.GetValueOrDefault<string>("all_headers_res","")); //testing
+        json.Add("REQUESTBODY", String.Format("{0}", req_body.Length > 1000 ? req_body.Remove(1000) : req_body)); //Request Body
+        json.Add("INTERFACETYPE","API");//Interface Type
+        json.Add("RESOURCETYPE", context.Variables.GetValueOrDefault<string>("componentName",""));//Service Name
+        json.Add("DIVISIONS", "{{tag-enterprise}}");//Tag
+        return json.ToString(Newtonsoft.Json.Formatting.None);
+    }" />
+	<log-to-eventhub logger-id="evh-enterprise-logging">@((string)context.Variables["apicommon_log_body"])</log-to-eventhub>
+</fragment>
+
+<!-- Compress Content -->
+<fragment>
+	<choose>
+		<when condition="@(context.Request.Headers.GetValueOrDefault("Content-Compress","") != "") ">
+			<send-request mode="new" response-variable-name="fn-decompress" timeout="60" ignore-error="true">
+				<set-url>{{function-backend-url}}/fn-decompress</set-url>
+				<set-method>POST</set-method>
+				<set-header name="Content-Compress" exists-action="override">
+					<value>@(context.Request.Headers.GetValueOrDefault("Content-Compress",""))</value>
+				</set-header>
+				<set-body>@(context.Request.Body.As<string>())</set-body>
+			</send-request>
+			<set-body>@(((IResponse)context.Variables["fn-decompress"]).Body.As<string>(preserveContent: true))</set-body>
+			<choose>
+				<when condition="@(((IResponse)context.Variables["fn-decompress"]).StatusCode != 200)">
+					<return-response>
+						<set-status code="@(((IResponse)context.Variables["fn-decompress"]).StatusCode)" />
+						<set-body>@(((IResponse)context.Variables["fn-decompress"]).Body.As<string>())</set-body>
+					</return-response>
+				</when>
+			</choose>
+		</when>
+	</choose>
+</fragment>
+
+<!-- Decompress Content -->
+<fragment>
+	<choose>
+		<when condition="@(context.Request.Headers.GetValueOrDefault("Content-Compress","") != "") ">
+			<send-request mode="new" response-variable-name="fn-decompress" timeout="60" ignore-error="true">
+				<set-url>{{function-backend-url}}/fn-decompress</set-url>
+				<set-method>POST</set-method>
+				<set-header name="Content-Compress" exists-action="override">
+					<value>@(context.Request.Headers.GetValueOrDefault("Content-Compress",""))</value>
+				</set-header>
+				<set-body>@(context.Request.Body.As<string>())</set-body>
+			</send-request>
+			<set-body>@(((IResponse)context.Variables["fn-decompress"]).Body.As<string>(preserveContent: true))</set-body>
+			<choose>
+				<when condition="@(((IResponse)context.Variables["fn-decompress"]).StatusCode != 200)">
+					<return-response>
+						<set-status code="@(((IResponse)context.Variables["fn-decompress"]).StatusCode)" />
+						<set-body>@(((IResponse)context.Variables["fn-decompress"]).Body.As<string>())</set-body>
+					</return-response>
+				</when>
+			</choose>
+		</when>
+	</choose>
+</fragment>
+
+<!-- Salesforce JWT Token Acquisition -->
+<fragment>
+	<set-variable name="exp" value="@((int)DateTime.UtcNow.Subtract(new DateTime(1970, 1, 1)).TotalSeconds + {{p2p-salesforce-jwt-expirytime}})" />
+	<send-request ignore-error="true" timeout="60" response-variable-name="jwtbearerToken" mode="new">
+		<set-url>{{p2p-salesforce-jwt-url}}</set-url>
+		<set-method>POST</set-method>
+		<set-header name="Content-Type" exists-action="override">
+			<value>application/json</value>
+		</set-header>
+		<set-body template="liquid">
+           {   "header": {"alg":"RS256"},
+               "certificate_kvturi": "{{keyvault-uri}}",
+               "certificate_name": "{{p2p-privatekey}}",
+               "claimset": { 
+                   "iss": "{{p2p-salesforce-jwt-iss}}",
+                   "aud": "{{p2p-salesforce-jwt-aud}}",
+                   "sub": "{{p2p-salesforce-jwt-sub}}",
+                   "exp": {{context.Variables["exp"]}}
+                   }
+            }
+        </set-body>
+	</send-request>
+	<choose>
+		<when condition="@(((IResponse)context.Variables["jwtbearerToken"]).StatusCode == 200)">
+			<send-request ignore-error="true" timeout="60" response-variable-name="bearerToken" mode="new">
+				<set-url>{{p2p-salesforce-token-url}}</set-url>
+				<set-method>POST</set-method>
+				<set-header name="Content-Type" exists-action="override">
+					<value>application/x-www-form-urlencoded</value>
+				</set-header>
+				<set-body>@("grant_type={{p2p-salesforce-grant-type}}&assertion=" + ((IResponse)context.Variables["jwtbearerToken"]).Body.As<string>())</set-body>
+			</send-request>
+			<choose>
+				<when condition="@(((IResponse)context.Variables["bearerToken"]).StatusCode == 200)">
+					<set-header name="Authorization" exists-action="override">
+						<value>@("Bearer " + ((IResponse)context.Variables["bearerToken"]).Body.As<JObject>()["access_token"] )</value>
+					</set-header>
+				</when>
+				<otherwise>
+					<return-response>
+						<set-status code="400" reason="Salesforce Token Failed" />
+						<set-body>@(((IResponse)context.Variables["bearerToken"]).Body.As<string>())</set-body>
+					</return-response>
+				</otherwise>
+			</choose>
+		</when>
+		<otherwise>
+			<return-response>
+				<set-status code="@(((IResponse)context.Variables["jwtbearerToken"]).StatusCode)" />
+				<set-body>@(((IResponse)context.Variables["jwtbearerToken"]).Body.As<string>())</set-body>
+			</return-response>
+		</otherwise>
+	</choose>
+</fragment>
+
+<!-- NiFi Cookie Auth -->
+<fragment>
+	<send-request ignore-error="true" timeout="60" response-variable-name="sessionCookie" mode="new">
+		<set-url>{{nif-cookie-auth-url}}</set-url>
+		<set-method>POST</set-method>
+		<set-header name="Content-Type" exists-action="override">
+			<value>application/json</value>
+		</set-header>
+		<set-body template="liquid">
+            {   
+                "loginName": "{{login-name}}",
+	            "password": "{{password}}",
+	            "appSystemTag": "FOUR_TRAK"
+            }
+        </set-body>
+	</send-request>
+	<choose>
+		<when condition="@(((IResponse)context.Variables["sessionCookie"]).StatusCode == 200)">
+			<set-variable name="session" value="@(((IResponse)context.Variables["sessionCookie"]).Headers.GetValueOrDefault("Set-Cookie").Split(';')[0])" />
+			<set-header name="Cookie" exists-action="override">
+				<value>@(context.Variables.GetValueOrDefault<string>("session", ""))</value>
+			</set-header>
+		</when>
+		<otherwise>
+			<return-response>
+				<set-status code="400" reason="Invalid credentials" />
+				<set-body>@(((IResponse)context.Variables["sessionCookie"]).Body.As<string>())</set-body>
+			</return-response>
+		</otherwise>
+	</choose>
+</fragment>
+
+<!-- Validate Content -->
+<fragment>
+	<set-variable name="data" value="@(context.Request.Body.As<JObject>(preserveContent: true)["data"])" />
+	<choose>
+		<when condition="@(context.Request.Body.As<JObject>(true)["data"] != null && context.Request.Body.As<JObject>(true)["data"].Type != JTokenType.Null)">
+			<set-variable name="date" value="@((string)context.Request.Body.As<JObject>(preserveContent: true)["data"]["date"])" />
+			<set-variable name="region" value="@((string)context.Request.Body.As<JObject>(preserveContent: true)["data"]["region"])" />
+			<set-variable name="runNr" value="@((string)context.Request.Body.As<JObject>(preserveContent: true)["data"]["runNr"])" />
+		</when>
+		<when condition="@(context.Request.Body.As<JObject>(preserveContent: true)["data"]["date"] == null && context.Request.Body.As<JObject>(preserveContent: true)["data"]["date"].Type == JTokenType.Null)">
+			<return-response>
+				<set-status code="400" reason="Bad Request" />
+				<set-body>Mandatory element 'date' is missing.</set-body>
+			</return-response>
+		</when>
+		<when condition="@(context.Request.Body.As<JObject>(true)["data"]["region"] == null && context.Request.Body.As<JObject>(true)["data"]["region"].Type == JTokenType.Null)">
+			<return-response>
+				<set-status code="400" reason="Bad Request" />
+				<set-body>Mandatory element 'region' is missing.</set-body>
+			</return-response>
+		</when>
+		<when condition="@(context.Request.Body.As<JObject>(true)["data"]["runNr"] == null && context.Request.Body.As<JObject>(true)["data"]["testNr"].Type == JTokenType.Null)">
+			<return-response>
+				<set-status code="400" reason="Bad Request" />
+				<set-body>Mandatory element 'test number' is missing.</set-body>
+			</return-response>
+		</when>
+	</choose>
+</fragment>
+
+<!-- PGP Encryption Call -->
+<fragment>
+	<send-request ignore-error="true" timeout="60" response-variable-name="pgp_response" mode="new">
+		<set-url>{{backend-url}}/test</set-url>
+		<set-method>POST</set-method>
+		<set-header name="Content-Type" exists-action="override">
+			<value>application/xml</value>
+		</set-header>
+	</send-request>
+	<choose>
+		<when condition="@(((IResponse)context.Variables["pgp_response"]).StatusCode == 200)">
+			<set-variable name="businessUnitRef" value="@{
+                string [] HostNameHeader;
+                context.Request.Headers.TryGetValue("businessunitref", out HostNameHeader);
+                return HostNameHeader[0];
+            }" />
+			<set-variable name="pgpEncryptedVal" value="@(((IResponse)context.Variables["pgp_response"]).Body.As<string>())" />
+			<authentication-basic username="{{username}}" password="{{password}}" />
+			<set-method>POST</set-method>
+			<set-backend-service base-url="{{backendurl}}" />
+			<rewrite-uri template="/GatewayImportService" copy-unmatched-params="true" />
+			<set-body template="liquid">
+				<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:rmt="http://www.rmt.com.au/">
+					<soapenv:Header />
+					<soapenv:Body>
+						<rmt:importGatewayMessage>
+							<arg0>{{context.Variables["businessUnitRef"]}}</arg0>
+							<arg1>{{context.Variables["pgpEncryptedVal"]}}</arg1>
+						</rmt:importGatewayMessage>
+					</soapenv:Body>
+				</soapenv:Envelope>
+			</set-body>
+		</when>
+		<otherwise>
+			<return-response>
+				<set-status code="@(((IResponse)context.Variables["Pgp_response"]).StatusCode)" />
+				<set-body>"@(((IResponse)context.Variables["Pgp_response"]).Body.As&amp;amp;amp;lt;string&amp;amp;amp;gt;())"</set-body>
+			</return-response>
+		</otherwise>
+	</choose>
+</fragment>
+</Collections>
